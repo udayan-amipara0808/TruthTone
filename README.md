@@ -1,4 +1,4 @@
-# TruthTone
+# TruthTone - https://truthtone.streamlit.app/
  
 **Detecting the true meaning behind the text — sarcasm and sentiment analysis powered by domain-adapted BERT.**
 
