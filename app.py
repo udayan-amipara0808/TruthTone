@@ -116,7 +116,7 @@ def predict_text(text, model, tokenizer):
 tokenizer = get_tokenizer()
 
 with st.sidebar:
-    st.image("https://placehold.co/75x75/1E3A8A/FFF?text=UA", width='content')
+    st.image("https://placehold.co/75x75/1E3A8A/FFF?text=UA", width=75)
 
     st.markdown("### About Me")
     st.markdown("**Name:** Udayan Amipara")
