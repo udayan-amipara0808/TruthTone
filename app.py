@@ -42,82 +42,78 @@ st.markdown(
     """
 ,unsafe_allow_html=True)
 
-@st.cache_resource(show_spinner="Loading BERT models — takes ~30 seconds on first run...")
-def get_weights_path(filename):
-    return hf_hub_download(
-        repo_id="udayan0808/truthtone-weights",
-        filename=filename
+
+@st.cache_resource(show_spinner=False)
+def get_tokenizer():
+    return BertTokenizer.from_pretrained('bert-base-uncased')
+
+
+def build_multitask_bert(max_len=128):
+    input_ids      = tf.keras.Input(shape=(max_len,), dtype=tf.int32, name='input_ids')
+    attention_mask = tf.keras.Input(shape=(max_len,), dtype=tf.int32, name='attention_mask')
+
+    bert_base     = TFBertModel.from_pretrained('bert-base-uncased')
+    bert_output   = bert_base({"input_ids": input_ids, "attention_mask": attention_mask})
+    pooled_output = bert_output[1]
+
+    shared_dropout = tf.keras.layers.Dropout(0.3)(pooled_output)
+
+    sarcasm_dense = tf.keras.layers.Dense(64, activation="relu")(shared_dropout)
+    sarcasm_out   = tf.keras.layers.Dense(1, activation="sigmoid", name="sarcasm_output")(sarcasm_dense)
+
+    sentiment_dense = tf.keras.layers.Dense(64, activation="relu")(shared_dropout)
+    sentiment_out   = tf.keras.layers.Dense(1, activation="sigmoid", name="sentiment_output")(sentiment_dense)
+
+    return tf.keras.Model(inputs=[input_ids, attention_mask], outputs=[sarcasm_out, sentiment_out])
+
+
+def load_model_weights(model, npz_path):
+    dummy_ids  = tf.zeros((1, 128), dtype=tf.int32)
+    dummy_mask = tf.zeros((1, 128), dtype=tf.int32)
+    model({"input_ids": dummy_ids, "attention_mask": dummy_mask})
+
+    loaded = np.load(npz_path)
+    weights_list = [loaded[f'arr_{i}'] for i in range(len(loaded.files))]
+
+    expected = len(model.get_weights())
+    if len(weights_list) != expected:
+        raise ValueError(
+            f"Weight count mismatch for {npz_path}: "
+            f"file has {len(weights_list)} arrays, model expects {expected}. "
+            "This means the architecture built here does not match the one "
+            "used when the weights were originally saved."
+        )
+
+    model.set_weights(weights_list)
+    return model
+
+
+
+@st.cache_resource(show_spinner="Loading model — this can take ~30s on first run...")
+def load_domain_model(domain_key):
+    weights_file = (
+        "bert_multitask_news_weights.npz"
+        if domain_key == "news"
+        else "bert_multitask_reddit_weights.npz"
     )
-def load_models_and_tokenizer():
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-    def build_multitask_bert(max_len=128):
-        input_ids      = tf.keras.Input(shape=(max_len,), dtype=tf.int32, name='input_ids')
-        attention_mask = tf.keras.Input(shape=(max_len,), dtype=tf.int32, name='attention_mask')
+    model = build_multitask_bert()
 
-        bert_base     = TFBertModel.from_pretrained('bert-base-uncased')
-        bert_output   = bert_base({"input_ids": input_ids, "attention_mask": attention_mask})
-        pooled_output = bert_output[1]
+    npz_path = hf_hub_download(
+        repo_id="udayan0808/truthtone-weights",
+        filename=weights_file
+    )
+    model = load_model_weights(model, npz_path)
+    return model
 
-        shared_dropout = tf.keras.layers.Dropout(0.3)(pooled_output)
 
-        sarcasm_dense = tf.keras.layers.Dense(64, activation="relu")(shared_dropout)
-        sarcasm_out   = tf.keras.layers.Dense(1, activation="sigmoid", name="sarcasm_output")(sarcasm_dense)
+def predict_text(text, model, tokenizer):
+    encoded = tokenizer([text], padding="max_length", truncation=True, max_length=128, return_tensors="tf")
+    pred = model.predict({"input_ids": encoded["input_ids"], "attention_mask": encoded["attention_mask"]}, verbose=0)
+    return pred[0][0][0], pred[1][0][0]
 
-        sentiment_dense = tf.keras.layers.Dense(64, activation="relu")(shared_dropout)
-        sentiment_out   = tf.keras.layers.Dense(1, activation="sigmoid", name="sentiment_output")(sentiment_dense)
 
-        return tf.keras.Model(inputs=[input_ids, attention_mask], outputs=[sarcasm_out, sentiment_out])
-
-    def load_model_weights(model, npz_path):
-        dummy_ids  = tf.zeros((1, 128), dtype=tf.int32)
-        dummy_mask = tf.zeros((1, 128), dtype=tf.int32)
-        model({"input_ids": dummy_ids, "attention_mask": dummy_mask})
-
-        loaded = np.load(npz_path)
-        weights_list = [loaded[f'arr_{i}'] for i in range(len(loaded.files))]
-
-        expected = len(model.get_weights())
-        if len(weights_list) != expected:
-            raise ValueError(
-                f"Weight count mismatch for {npz_path}: "
-                f"file has {len(weights_list)} arrays, model expects {expected}. "
-                "This means the architecture built here does not match the one "
-                "used when the weights were originally saved."
-            )
-
-        model.set_weights(weights_list)
-        return model
-
-    news_model   = build_multitask_bert()
-    reddit_model = build_multitask_bert()
-
-    models_loaded = False
-    try:
-        news_model_path = get_weights_path("bert_multitask_news_weights.npz")
-        reddit_model_path = get_weights_path("bert_multitask_reddit_weights.npz")
-
-        news_model = load_model_weights(news_model, news_model_path)
-        reddit_model = load_model_weights(reddit_model, reddit_model_path)
-        models_loaded = True
-    except FileNotFoundError as e:
-        st.error(f"Weight file not found: {e}")
-    except Exception as e:
-        st.error(f"Weight loading error: {e}")
-
-    return tokenizer, news_model, reddit_model, models_loaded
-
-tokenizer , news_model , reddit_model, is_loaded = load_models_and_tokenizer()
-
-def predict_text(text,model,tokenizer):
-
-    if not is_loaded:
-        time.sleep(1)
-        return np.random.rand(), np.random.rand()
-
-    encoded  = tokenizer([text],padding="max_length",truncation=True,max_length=128,return_tensors="tf")
-    pred = model.predict({"input_ids":encoded["input_ids"], "attention_mask":encoded["attention_mask"]}, verbose=0)
-    return pred[0][0][0],pred[1][0][0]
+tokenizer = get_tokenizer()
 
 with st.sidebar:
     st.image("https://placehold.co/75x75/1E3A8A/FFF?text=UA", width='content')
@@ -144,9 +140,6 @@ with st.sidebar:
         "two distinct models were trained to capture domain-specific nuances."
     )
 
-    st.divider()
-    st.caption(f"Model status: {' Weights loaded' if is_loaded else 'Weights NOT loaded — showing random demo values'}")
-
 st.markdown('<h1 class="main-title">TruthTone - Multi-Task Sarcasm & Sentiment AI</h1>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Detecting the true meaning behind the text using BERT</p>', unsafe_allow_html=True)
 
@@ -156,6 +149,7 @@ domain = st.radio(
     options=["News Headline (Formal)", " Social Media / Reddit (Informal)"],
     horizontal=True
 )
+domain_key = "news" if "News" in domain else "reddit"
 
 st.markdown("### 2. Enter Text")
 user_input = st.text_area("Type or paste a sentence here...", height=100,
@@ -165,43 +159,48 @@ if st.button("Analyze Text", type="primary", use_container_width=True):
     if user_input.strip() == "":
         st.warning("Please enter some text to analyze.")
     else:
-        with st.spinner("BERT is reading between the lines..."):
-            # Select the right brain based on user toggle
-            active_model = news_model if "News" in domain else reddit_model
+        try:
+            with st.spinner("BERT is reading between the lines..."):
+                # Only builds/loads the model for the SELECTED domain.
+                # If the other domain was already loaded earlier in this
+                # session, Streamlit's cache reuses it -- but at no point
+                # are both models forced into memory just to show the UI.
+                active_model = load_domain_model(domain_key)
 
-            sarc_score, sent_score = predict_text(user_input, active_model, tokenizer)
+                sarc_score, sent_score = predict_text(user_input, active_model, tokenizer)
 
-            # Interpret the scores
             is_sarcastic = sarc_score > 0.5
             literal_sentiment = "Positive" if sent_score > 0.5 else "Negative"
 
-            # The Sarcasm Adjustment Logic
             if is_sarcastic:
                 true_meaning = "Negative" if literal_sentiment == "Positive" else "Positive"
                 interpretation = f"The literal words are **{literal_sentiment}**, but the model detects heavy sarcasm. The *true* intent is likely **{true_meaning}**."
             else:
                 interpretation = f"The model detects no sarcasm. The literal meaning holds: **{literal_sentiment}**."
 
-        st.markdown("### Analysis Results")
+            st.markdown("### Analysis Results")
 
-        col1, col2 = st.columns(2)
+            col1, col2 = st.columns(2)
 
-        with col1:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Sarcasm Confidence", f"{sarc_score * 100:.1f}%",
-                      delta="Sarcastic" if is_sarcastic else "Literal",
-                      delta_color="inverse" if is_sarcastic else "normal")
-            st.progress(float(sarc_score))
-            st.markdown('</div>', unsafe_allow_html=True)
+            with col1:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.metric("Sarcasm Confidence", f"{sarc_score * 100:.1f}%",
+                          delta="Sarcastic" if is_sarcastic else "Literal",
+                          delta_color="inverse" if is_sarcastic else "normal")
+                st.progress(float(sarc_score))
+                st.markdown('</div>', unsafe_allow_html=True)
 
-        with col2:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Literal Sentiment Score", f"{sent_score * 100:.1f}%",
-                      delta="Positive" if sent_score > 0.5 else "Negative")
-            st.progress(float(sent_score))
-            st.markdown('</div>', unsafe_allow_html=True)
+            with col2:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.metric("Literal Sentiment Score", f"{sent_score * 100:.1f}%",
+                          delta="Positive" if sent_score > 0.5 else "Negative")
+                st.progress(float(sent_score))
+                st.markdown('</div>', unsafe_allow_html=True)
 
-        st.success(f"**Pipeline Conclusion:** {interpretation}")
+            st.success(f"**Pipeline Conclusion:** {interpretation}")
+
+        except Exception as e:
+            st.error(f"Something went wrong while loading the model or predicting: {e}")
 
 st.divider()
 st.markdown("### Model Performance Metrics")
@@ -209,7 +208,6 @@ st.markdown("Compare how the two models perform on their respective domains:")
 
 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
 
-# Replace these placeholder numbers with your actual training accuracies!
 with m_col1:
     st.metric(label="News Sarcasm Accuracy", value="93.9%")
 with m_col2:
